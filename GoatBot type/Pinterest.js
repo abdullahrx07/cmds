@@ -1,7 +1,7 @@
 const axios = require("axios");
 
 // Set this to your deployed Pinterest-xdi base URL
-const BASE_URL = process.env.PINXDI_BASE_URL || "https://pinterest-xdi.onrender.com";
+const BASE_URL = process.env.PINXDI_BASE_URL || "https://pinterest-api.agi.bd";
 
 // axios error responses come back as streams; read the body to surface the
 // server's JSON detail (e.g. the 502 from a failed ffmpeg run).
