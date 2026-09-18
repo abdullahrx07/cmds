@@ -1,7 +1,36 @@
 const axios = require("axios");
 
-// Set this to your deployed Pinterest-xdi base URL
-const BASE_URL = process.env.PINXDI_BASE_URL || "https://pinterest-api.agi.bd";
+// Base URL is pulled from the "pin" key of this shared config, instead of
+// being hardcoded here.
+const CONFIG_URL = "https://raw.githubusercontent.com/abdullahrx07/X-api/refs/heads/main/MaRiA/baseApiUrl.json";
+const CACHE_TTL = 5 * 60 * 1000; // 5 min
+
+let cachedBaseUrl = null;
+let cachedAt = 0;
+
+async function getBaseUrl() {
+  const now = Date.now();
+  if (cachedBaseUrl && now - cachedAt < CACHE_TTL) return cachedBaseUrl;
+
+  const res = await axios.get(CONFIG_URL, { timeout: 10000 });
+  const raw = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
+
+  let pinUrl;
+  try {
+    const parsed = typeof res.data === "object" ? res.data : JSON.parse(raw);
+    pinUrl = parsed.pin;
+  } catch {
+    // config file isn't always strict JSON (missing commas etc.) — fall
+    // back to pulling the "pin" value out with a regex.
+    const m = raw.match(/"pin"\s*:\s*"([^"]+)"/);
+    pinUrl = m && m[1];
+  }
+
+  if (!pinUrl) throw new Error("pin key not found in config");
+  cachedBaseUrl = pinUrl.replace(/\/+$/, "");
+  cachedAt = now;
+  return cachedBaseUrl;
+}
 
 // axios error responses come back as streams; read the body to surface the
 // server's JSON detail (e.g. the 502 from a failed ffmpeg run).
@@ -28,10 +57,31 @@ async function fetchAttachment(url, filename) {
   return res.data;
 }
 
+async function downloadVideo({ api, item, choice, message }) {
+  const waitMsg = choice
+    ? await message.reply(`⬇️ Downloading video ${choice}...`)
+    : await message.reply(`⬇️ Downloading video...`);
+  try {
+    const dlUrl = item.download_url.startsWith("http")
+      ? item.download_url
+      : `${await getBaseUrl()}${item.download_url}`;
+    const attachment = await fetchAttachment(dlUrl, `${item.id}.mp4`);
+    await message.reply({ attachment });
+  } catch (e) {
+    const reason = await readErrorBody(e) || e.message;
+    await message.reply(`❌ Failed to download video${choice ? ` ${choice}` : ""}.\nReason: ${reason}`);
+  } finally {
+    if (waitMsg && waitMsg.messageID) {
+      try { api.unsendMessage(waitMsg.messageID); } catch {}
+    }
+  }
+}
+
 module.exports = {
   config: {
-    name: "pin",
-    version: "1.1.0",
+    name: "Pinterest",
+    aliases: ["pin"],
+    version: "1.2.0",
     author: "rX",
     countDown: 5,
     role: 0,
@@ -39,20 +89,23 @@ module.exports = {
     longDescription: "Search Pinterest via Pinterest-xdi API and send images or videos (with sound).",
     category: "media",
     guide: {
-      en: "{pn} <query> [video|image] [-N]\nEx: {pn} sunset video -7\nEx: {pn} flowers -3"
+      en: "{pn} <query> [-N]        (image, default)\n{pn} -v <query> [-N]     (video)\nEx: {pn} flowers -3\nEx: {pn} -v sunset -7"
     }
   },
 
   onStart: async function ({ api, event, args, message }) {
-    if (!args.length) return message.reply("⚠️ Usage: !pin <query> [video|image] [-N]");
+    if (!args.length) return message.reply("⚠️ Usage: !pin <query> [-N]  |  !pin -v <query> [-N]");
 
     let mode = "image";
     let num = 10;
     const queryParts = [];
 
     for (const arg of args) {
-      if (arg === "video" || arg === "image") {
-        mode = arg;
+      const lower = arg.toLowerCase();
+      if (lower === "-v" || lower === "-video" || lower === "video") {
+        mode = "video";
+      } else if (lower === "-i" || lower === "-image" || lower === "image") {
+        mode = "image";
       } else if (/^-\d+$/.test(arg)) {
         num = Math.min(10, Math.max(1, parseInt(arg.slice(1), 10)));
       } else {
@@ -70,8 +123,9 @@ module.exports = {
     const waitMsg = await message.reply(`🔍 Searching Pinterest for "${query}" (${mode}, ${num})...`);
 
     try {
+      const baseUrl = await getBaseUrl();
       const doSearch = () =>
-        axios.get(`${BASE_URL}/api/search`, {
+        axios.get(`${baseUrl}/api/search`, {
           params: { q: searchQuery, mode, num },
           timeout: 60000
         });
@@ -106,8 +160,14 @@ module.exports = {
         });
       }
 
-      // Video mode: send thumbnails with numbers, user replies with a number
-      // to pick which video to download.
+      // Video mode with a single result (e.g. "-1"): skip the picker and
+      // download it directly.
+      if (results.length === 1) {
+        return downloadVideo({ api, item: results[0], message });
+      }
+
+      // Video mode with multiple results: send thumbnails with numbers,
+      // user replies with a number to pick which video to download.
       const thumbs = [];
       const list = [];
       results.forEach((item, i) => {
@@ -153,21 +213,6 @@ module.exports = {
       return message.reply(`⚠️ Please reply with a number between 1 and ${Reply.results.length}.`);
     }
     global.GoatBot.onReply.delete(Reply.messageID);
-
-    const waitMsg = await message.reply(`⬇️ Downloading video ${choice}...`);
-    try {
-      const dlUrl = item.download_url.startsWith("http")
-        ? item.download_url
-        : `${BASE_URL}${item.download_url}`;
-      const attachment = await fetchAttachment(dlUrl, `${item.id}.mp4`);
-      await message.reply({ attachment });
-    } catch (e) {
-      const reason = await readErrorBody(e) || e.message;
-      await message.reply(`❌ Failed to download video ${choice}.\nReason: ${reason}`);
-    } finally {
-      if (waitMsg && waitMsg.messageID) {
-        try { api.unsendMessage(waitMsg.messageID); } catch {}
-      }
-    }
+    return downloadVideo({ api, item, choice, message });
   }
 };
