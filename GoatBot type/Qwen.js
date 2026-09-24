@@ -1,22 +1,109 @@
 const axios = require("axios");
-const fs = require("fs");
+const fs = require("fs-extra");
 const path = require("path");
-
-module.exports.config = {
-  name: "qwen",
-  version: "2.0.0",
-  hasPermssion: 0,
-  credits: "rX",
-  description: "Edit image using Qwen API (supports 1 or 2 source images)",
-  commandCategory: "AI",
-  usages: "<text> (reply to an image) | -a <text> (reply to an image, then reply to the bot's message with a 2nd photo)",
-  cooldowns: 10
-};
 
 const API_BASE = "https://qwen-api-gq76.onrender.com/edit";
 const PENDING_TIMEOUT = 5 * 60 * 1000; // 5 min
 
-/** Return the first *photo* attachment URL from a list of attachments. */
+module.exports = {
+  config: {
+    name: "qwen",
+    aliases: ["edit"],
+    version: "2.0.0",
+    author: "rX",
+    countDown: 10,
+    role: 0,
+    description: {
+      en: "Edit image using Qwen API (supports 1 or 2 source images)"
+    },
+    category: "ai",
+    guide: {
+      en:
+        "{pn} <text> (reply to an image)\n" +
+        "{pn} -a <text> (reply to an image, then reply to the bot's message with a 2nd photo)"
+    }
+  },
+
+  onStart: async function ({ api, event, args, message }) {
+    const addMode = args.length > 0 && (args[0] === "-a" || args[0] === "--add");
+    const promptArgs = addMode ? args.slice(1) : args;
+    const prompt = promptArgs.join(" ").trim();
+
+    if (!prompt) {
+      return message.reply(
+        addMode
+          ? "⚠️ Usage: qwen -a <text> (reply to an image)"
+          : "⚠️ Please provide some text for the image."
+      );
+    }
+
+    const imgUrl = getReplyImageUrl(event);
+    if (!imgUrl) {
+      return message.reply("⚠️ Please reply to an image.");
+    }
+
+    api.setMessageReaction("🐣", event.messageID, () => {}, true);
+
+    if (!addMode) {
+      return runEditRequest({
+        api,
+        event,
+        message,
+        prompt,
+        imageUrls: [imgUrl],
+        reactionMsgID: event.messageID
+      });
+    }
+
+    // Two-image mode: ask for 2nd photo, then wait for reply
+    message.reply(
+      "📷 𝐀𝐝𝐝 𝐚𝐧𝐨𝐭𝐡𝐞𝐫 𝐩𝐡𝐨𝐭𝐨 — reply to this message with the 2nd image.",
+      (err, info) => {
+        if (err || !info) {
+          api.setMessageReaction("❌", event.messageID, () => {}, true);
+          return;
+        }
+
+        global.GoatBot.onReply.set(info.messageID, {
+          commandName: this.config.name,
+          messageID: info.messageID,
+          author: event.senderID,
+          prompt,
+          imageUrls: [imgUrl],
+          reactionMsgID: event.messageID
+        });
+
+        // Auto-expire so it doesn't leak
+        setTimeout(() => {
+          global.GoatBot.onReply.delete(info.messageID);
+        }, PENDING_TIMEOUT);
+      }
+    );
+  },
+
+  onReply: async function ({ api, event, message, Reply }) {
+    if (event.senderID !== Reply.author) return;
+
+    const secondUrl = getOwnImageUrl(event);
+    if (!secondUrl) {
+      return message.reply("⚠️ Please reply to this message with a photo (image attachment).");
+    }
+
+    // Remove pending entry so a 2nd reply can't trigger another API call
+    global.GoatBot.onReply.delete(Reply.messageID);
+
+    return runEditRequest({
+      api,
+      event,
+      message,
+      prompt: Reply.prompt,
+      imageUrls: [...Reply.imageUrls, secondUrl],
+      reactionMsgID: Reply.reactionMsgID
+    });
+  }
+};
+
+/** Return the first photo attachment URL from a list of attachments. */
 function pickPhotoUrl(attachments) {
   if (!Array.isArray(attachments)) return null;
   const a = attachments.find(
@@ -33,111 +120,8 @@ function getOwnImageUrl(event) {
   return pickPhotoUrl(event.attachments);
 }
 
-/** Safe file delete (never throws). */
-function safeUnlink(p) {
-  fs.unlink(p, () => {});
-}
-
-module.exports.run = async function ({ api, event, args }) {
-  const addMode = args.length > 0 && (args[0] === "-a" || args[0] === "--add");
-  const promptArgs = addMode ? args.slice(1) : args;
-  const prompt = promptArgs.join(" ").trim();
-
-  if (!prompt) {
-    return api.sendMessage(
-      addMode
-        ? "⚠️ Usage: qwen -a <text> (reply to an image)"
-        : "⚠️ Please provide some text for the image.",
-      event.threadID,
-      event.messageID
-    );
-  }
-
-  const imgUrl = getReplyImageUrl(event);
-  if (!imgUrl) {
-    return api.sendMessage("⚠️ Please reply to an image.", event.threadID, event.messageID);
-  }
-
-  api.setMessageReaction("🐣", event.messageID, () => {}, true);
-
-  if (!addMode) {
-    return runEditRequest({
-      api,
-      event,
-      prompt,
-      imageUrls: [imgUrl],
-      reactionMsgID: event.messageID
-    });
-  }
-
-  // Two-image mode
-  api.sendMessage(
-    "📷 𝐀𝐝𝐝 𝐚𝐧𝐨𝐭𝐡𝐞𝐫 𝐩𝐡𝐨𝐭𝐨 — reply to this message with the 2nd image.",
-    event.threadID,
-    (err, info) => {
-      if (err || !info) {
-        api.setMessageReaction("❌", event.messageID, () => {}, true);
-        return;
-      }
-
-      const client = global.client;
-      if (!client || !Array.isArray(client.handleReply)) {
-        api.setMessageReaction("❌", event.messageID, () => {}, true);
-        return api.sendMessage(
-          "❌ handleReply is not supported by this bot framework.",
-          event.threadID,
-          event.messageID
-        );
-      }
-
-      client.handleReply.push({
-        name: module.exports.config.name,
-        messageID: info.messageID,
-        author: event.senderID,
-        prompt,
-        imageUrls: [imgUrl],
-        reactionMsgID: event.messageID
-      });
-
-      // Auto-expire pending reply so it doesn't leak forever
-      setTimeout(() => {
-        const i = client.handleReply.findIndex((h) => h.messageID === info.messageID);
-        if (i !== -1) client.handleReply.splice(i, 1);
-      }, PENDING_TIMEOUT);
-    },
-    event.messageID
-  );
-};
-
-module.exports.handleReply = async function ({ api, event, handleReply }) {
-  if (event.senderID !== handleReply.author) return;
-
-  const secondUrl = getOwnImageUrl(event);
-  if (!secondUrl) {
-    return api.sendMessage(
-      "⚠️ Please reply to this message with a photo (image attachment).",
-      event.threadID,
-      event.messageID
-    );
-  }
-
-  // Remove pending entry so a 2nd reply can't trigger another API call
-  const client = global.client;
-  if (client && Array.isArray(client.handleReply)) {
-    const i = client.handleReply.findIndex((h) => h.messageID === handleReply.messageID);
-    if (i !== -1) client.handleReply.splice(i, 1);
-  }
-
-  return runEditRequest({
-    api,
-    event,
-    prompt: handleReply.prompt,
-    imageUrls: [...handleReply.imageUrls, secondUrl],
-    reactionMsgID: handleReply.reactionMsgID
-  });
-};
-
-async function runEditRequest({ api, event, prompt, imageUrls, reactionMsgID }) {
+/** Shared: call the API and send back the edited image. */
+async function runEditRequest({ api, event, message, prompt, imageUrls, reactionMsgID }) {
   let filePath = null;
 
   try {
@@ -161,11 +145,11 @@ async function runEditRequest({ api, event, prompt, imageUrls, reactionMsgID }) 
       const errMsg = (data && (data.error || data.message)) || "Unknown reason";
       console.log("❌ Failed. success:", data && data.success, "| reason:", errMsg);
       api.setMessageReaction("⚠️", reactionMsgID, () => {}, true);
-      return api.sendMessage(`❌ API Error: ${errMsg}`, event.threadID, event.messageID);
+      return message.reply(`❌ API Error: ${errMsg}`);
     }
 
     const cacheDir = path.join(__dirname, "cache");
-    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.ensureDirSync(cacheDir);
     filePath = path.join(
       cacheDir,
       `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
@@ -179,7 +163,7 @@ async function runEditRequest({ api, event, prompt, imageUrls, reactionMsgID }) 
     const writer = fs.createWriteStream(filePath);
 
     await new Promise((resolve, reject) => {
-      imageResponse.data.on("error", reject); // stream error handle
+      imageResponse.data.on("error", reject);
       writer.on("finish", resolve);
       writer.on("error", reject);
       imageResponse.data.pipe(writer);
@@ -189,14 +173,12 @@ async function runEditRequest({ api, event, prompt, imageUrls, reactionMsgID }) 
     filePath = null; // ownership goes to the send callback
 
     api.setMessageReaction("🧃", reactionMsgID, () => {}, true);
-    api.sendMessage(
+    message.reply(
       {
         body: "> 🎀 𝐃𝐨𝐧𝐞",
         attachment: fs.createReadStream(sentPath)
       },
-      event.threadID,
-      () => safeUnlink(sentPath),
-      event.messageID
+      () => fs.unlink(sentPath, () => {})
     );
   } catch (err) {
     if (err.response) {
@@ -210,9 +192,9 @@ async function runEditRequest({ api, event, prompt, imageUrls, reactionMsgID }) 
       console.log("❌ ERROR:", err.message);
     }
 
-    if (filePath) safeUnlink(filePath); // partial file cleanup
+    if (filePath) fs.unlink(filePath, () => {});
 
     api.setMessageReaction("❌", reactionMsgID, () => {}, true);
-    api.sendMessage("❌ Error while processing the image.", event.threadID, event.messageID);
+    message.reply("❌ Error while processing the image.");
   }
-}
+  }
