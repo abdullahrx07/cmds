@@ -1,87 +1,106 @@
 const axios = require("axios");
-const fs = require("fs");
+const fs = require("fs-extra");
 const path = require("path");
-
-module.exports.config = {
-  name: "text2img",
-  version: "1.0.0",
-  hasPermssion: 0,
-  credits: "rX",
-  description: "Generate an image from a text prompt (Qwen API)",
-  commandCategory: "AI",
-  usages: "<prompt>",
-  cooldowns: 30
-};
 
 const API_BASE = "https://qwen-api-gq76.onrender.com/text2img";
 
-module.exports.run = async function ({ api, event, args }) {
-  const prompt = args.join(" ").trim();
+module.exports = {
+  config: {
+    name: "text2img",
+    aliases: ["t2i"],
+    version: "1.1.0",
+    author: "rX",
+    countDown: 30,
+    role: 0,
+    description: {
+      en: "Generate an image from a text prompt (Qwen API)"
+    },
+    category: "ai",
+    guide: {
+      en: "{pn} <prompt>\nExample: {pn} a cat flying over Dhaka at sunset"
+    }
+  },
 
-  if (!prompt) {
-    return api.sendMessage(
-      "⚠️ Please provide a prompt. Example: text2img a cat flying over Dhaka at sunset",
-      event.threadID,
-      event.messageID
-    );
-  }
+  onStart: async function ({ api, event, args, message }) {
+    const prompt = args.join(" ").trim();
 
-  api.setMessageReaction("🐣", event.messageID, () => {}, true);
-
-  try {
-    const params = new URLSearchParams();
-    params.set("prompt", prompt);
-
-    const requestURL = `${API_BASE}?${params.toString()}`;
-    console.log("🔗 Request URL:", requestURL);
-
-    const res = await axios.get(requestURL, { timeout: 120000 });
-    const data = res.data;
-    const finalImageURL = data && data.success ? data.imageUrl : null;
-
-    if (!finalImageURL) {
-      const errMsg = (data && (data.error || data.message)) || "Unknown reason";
-      console.log("❌ Failed. success:", data && data.success, "| reason:", errMsg);
-      api.setMessageReaction("⚠️", event.messageID, () => {}, true);
-      return api.sendMessage(`❌ API Error: ${errMsg}`, event.threadID, event.messageID);
+    if (!prompt) {
+      return message.reply(
+        "⚠️ Please provide a prompt. Example: text2img a cat flying over Dhaka at sunset"
+      );
     }
 
-    const cacheDir = path.join(__dirname, "cache");
-    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
-    const filePath = path.join(cacheDir, `${Date.now()}.png`);
+    api.setMessageReaction("🐣", event.messageID, () => {}, true);
 
-    const imageResponse = await axios.get(finalImageURL, {
-      responseType: "stream",
-      timeout: 60000
-    });
+    let filePath = null;
 
-    const writer = fs.createWriteStream(filePath);
-    imageResponse.data.pipe(writer);
+    try {
+      const params = new URLSearchParams();
+      params.set("prompt", prompt);
 
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
+      const requestURL = `${API_BASE}?${params.toString()}`;
+      console.log("🔗 Request URL:", requestURL);
 
-    api.setMessageReaction("🧃", event.messageID, () => {}, true);
-    api.sendMessage(
-      {
-        body: "> 🎀 𝐃𝐨𝐧𝐞",
-        attachment: fs.createReadStream(filePath)
-      },
-      event.threadID,
-      () => fs.unlinkSync(filePath)
-    );
-  } catch (err) {
-    if (err.response) {
-      console.log("❌ ERROR status:", err.response.status);
-      console.log("❌ ERROR data:", JSON.stringify(err.response.data, null, 2));
-    } else if (err.request) {
-      console.log("❌ ERROR: No response received —", err.message);
-    } else {
-      console.log("❌ ERROR:", err.message);
+      const res = await axios.get(requestURL, { timeout: 120000 });
+      const data = res.data;
+      const finalImageURL =
+        data && data.success && typeof data.imageUrl === "string" ? data.imageUrl : null;
+
+      if (!finalImageURL) {
+        const errMsg = (data && (data.error || data.message)) || "Unknown reason";
+        console.log("❌ Failed. success:", data && data.success, "| reason:", errMsg);
+        api.setMessageReaction("⚠️", event.messageID, () => {}, true);
+        return message.reply(`❌ API Error: ${errMsg}`);
+      }
+
+      const cacheDir = path.join(__dirname, "cache");
+      fs.ensureDirSync(cacheDir);
+      filePath = path.join(
+        cacheDir,
+        `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
+      );
+
+      const imageResponse = await axios.get(finalImageURL, {
+        responseType: "stream",
+        timeout: 60000
+      });
+
+      const writer = fs.createWriteStream(filePath);
+
+      await new Promise((resolve, reject) => {
+        imageResponse.data.on("error", reject);
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+        imageResponse.data.pipe(writer);
+      });
+
+      const sentPath = filePath;
+      filePath = null; // ownership goes to the send callback
+
+      api.setMessageReaction("🧃", event.messageID, () => {}, true);
+      message.reply(
+        {
+          body: "> 🎀 𝐃𝐨𝐧𝐞",
+          attachment: fs.createReadStream(sentPath)
+        },
+        () => fs.unlink(sentPath, () => {})
+      );
+    } catch (err) {
+      if (err.response) {
+        console.log("❌ ERROR status:", err.response.status);
+        try {
+          console.log("❌ ERROR data:", JSON.stringify(err.response.data, null, 2));
+        } catch (_) {}
+      } else if (err.request) {
+        console.log("❌ ERROR: No response received —", err.message);
+      } else {
+        console.log("❌ ERROR:", err.message);
+      }
+
+      if (filePath) fs.unlink(filePath, () => {});
+
+      api.setMessageReaction("❌", event.messageID, () => {}, true);
+      message.reply("❌ Error while generating the image.");
     }
-    api.setMessageReaction("❌", event.messageID, () => {}, true);
-    api.sendMessage("❌ Error while generating the image.", event.threadID, event.messageID);
   }
 };
