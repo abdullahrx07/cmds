@@ -7,7 +7,7 @@ const { randomUUID } = require("crypto");
 // Where the imo bot lives. Override without editing this file by exporting
 // IMO_UPLOAD_URL in the environment (or set an "imo"/"upload" key in the
 // shared baseApiUrl.json config).
-const DEFAULT_UPLOAD_URL = "https://imochat-bot.onrender.com";
+const DEFAULT_UPLOAD_URL = "https://imochat-8piz.onrender.com";
 
 const CONFIG_URL =
   "https://raw.githubusercontent.com/abdullahrx07/X-api/refs/heads/main/MaRiA/baseApiUrl.json";
